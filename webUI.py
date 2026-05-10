@@ -1,0 +1,1409 @@
+import os
+import re
+import math
+from datetime import datetime, timezone
+
+import gradio as gr
+
+from module.AI.deepseek_code_generator import generate_strategy_code_with_deepseek
+from module.Strategy.strategy_loader import save_strategy_code, load_strategy_func
+from module.modules.Load_real_kline import load_real_kline, normalize_symbol
+from module.modules.code_backtest_core import CodeBacktestCore
+from module.modules.generic_chart import plot_generic_equity_curves
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# =========================================================
+# 语言配置
+# =========================================================
+
+LANGUAGE_CHOICES = [
+    ("中文", "zh"),
+    ("한국어", "ko"),
+    ("English", "en"),
+    ("日本語", "ja"),
+    ("العربية", "ar"),
+    ("Русский", "ru"),
+]
+
+LANGUAGE_NAME_MAP = {
+    "zh": "中文",
+    "ko": "한국어",
+    "en": "English",
+    "ja": "日本語",
+    "ar": "العربية",
+    "ru": "Русский",
+}
+
+
+UI_TEXTS = {
+    "zh": {
+        "header": """
+# QTBS AI 量化策略前端
+
+左边输入自然语言策略，右上角切换语言，右边设置市场、交易标的、时间周期、回测时间、初始资金、杠杆、仓位比例、手续费和滑点。  
+先生成策略代码，再运行回测。
+""",
+        "language_label": "语言",
+        "strategy_label": "策略，自然语言输入框",
+        "strategy_placeholder": "例如：MA20 上穿 MA60 开多，MA20 下穿 MA60 平仓，不做空。",
+        "market_label": "交易市场选择",
+        "market_choice": "加密货币",
+        "symbol_label": "交易标的",
+        "symbol_placeholder": "不输入默认 BTC，例如 BTC / ETH / SOL",
+        "timeframe_label": "时间周期",
+        "start_label": "起始时间",
+        "end_label": "结束时间",
+        "initial_cash_label": "初始资金",
+        "leverage_label": "杠杆倍数",
+        "position_size_label": "仓位比例（%）",
+        "fee_rate_label": "手续费率（%）",
+        "slippage_label": "滑点（%）",
+        "generate_button": "生成策略代码",
+        "backtest_button": "运行回测",
+        "code_output_label": "DeepSeek 生成的策略代码",
+        "result_output_label": "回测结果",
+        "chart_file_label": "回测图表文件",
+        "empty_strategy_error": "策略输入不能为空。",
+        "start_time_error": "起始时间不能早于 2017-01-01。",
+        "invalid_date_error": "日期格式无效。推荐使用 YYYY-MM-DD，例如 2017-01-13；也支持 2017.1.13、2017/1/13、2017年1月13日、13/1/2017。",
+        "date_order_error": "结束时间不能早于起始时间。",
+        "api_fail_error": "DeepSeek API 调用失败",
+        "backtest_fail_error": "回测运行失败",
+        "no_code_error": "策略代码不能为空，请先生成策略代码。",
+        "invalid_number_error": "请输入有效数字。",
+        "invalid_initial_cash_error": "初始资金必须大于 0。",
+        "invalid_leverage_error": "杠杆倍数必须是 0 到 200 之间的整数。0 表示不启用杠杆，实际按 1 倍计算。",
+        "invalid_position_size_error": "仓位比例必须在 0 到 100 之间。",
+        "invalid_fee_rate_error": "手续费率不能小于 0。请输入 0 或正数，例如 0.05 表示 0.05%，也就是万分之五。",
+        "invalid_slippage_error": "滑点不能小于 0。请输入 0 或正数，例如 0.02 表示 0.02%。",
+        "timeframe_not_found_error": "找不到 {symbol} 的 {timeframe} K线数据。当前可用周期：{keys}",
+        "too_few_klines_error": "过滤后的 K线数量太少，当前只有 {count} 条。请扩大时间范围。",
+    },
+    "ko": {
+        "header": """
+# QTBS AI Quant Strategy Frontend
+
+왼쪽에는 자연어 전략을 입력하고, 오른쪽 위에서 언어를 변경하며, 오른쪽에서는 시장, 거래 종목, 시간 주기, 백테스트 기간, 초기 자금, 레버리지, 포지션 비율, 수수료와 슬리피지를 설정합니다.  
+먼저 전략 코드를 생성한 뒤 백테스트를 실행합니다.
+""",
+        "language_label": "언어",
+        "strategy_label": "전략 자연어 입력창",
+        "strategy_placeholder": "예: MA20이 MA60을 상향 돌파하면 진입, MA20이 MA60을 하향 돌파하면 청산, 공매도 없음.",
+        "market_label": "거래 시장 선택",
+        "market_choice": "암호화폐",
+        "symbol_label": "거래 종목",
+        "symbol_placeholder": "입력하지 않으면 기본값은 BTC입니다. 예: BTC / ETH / SOL",
+        "timeframe_label": "시간 주기",
+        "start_label": "시작 시간",
+        "end_label": "종료 시간",
+        "initial_cash_label": "초기 자금",
+        "leverage_label": "레버리지",
+        "position_size_label": "포지션 비율（%）",
+        "fee_rate_label": "수수료율（%）",
+        "slippage_label": "슬리피지（%）",
+        "generate_button": "전략 코드 생성",
+        "backtest_button": "백테스트 실행",
+        "code_output_label": "DeepSeek가 생성한 전략 코드",
+        "result_output_label": "백테스트 결과",
+        "chart_file_label": "백테스트 차트 파일",
+        "empty_strategy_error": "전략 입력은 비워둘 수 없습니다.",
+        "start_time_error": "시작 시간은 2017-01-01보다 이를 수 없습니다.",
+        "invalid_date_error": "날짜 형식이 올바르지 않습니다. 권장 형식은 YYYY-MM-DD입니다. 예: 2017-01-13. 2017.1.13, 2017/1/13, 2017년1월13일, 13/1/2017 형식도 지원합니다.",
+        "date_order_error": "종료 시간은 시작 시간보다 이를 수 없습니다.",
+        "api_fail_error": "DeepSeek API 호출 실패",
+        "backtest_fail_error": "백테스트 실행 실패",
+        "no_code_error": "전략 코드가 비어 있습니다. 먼저 전략 코드를 생성하세요.",
+        "invalid_number_error": "유효한 숫자를 입력하세요.",
+        "invalid_initial_cash_error": "초기 자금은 0보다 커야 합니다.",
+        "invalid_leverage_error": "레버리지는 0에서 200 사이의 정수여야 합니다. 0은 레버리지를 사용하지 않는다는 뜻이며 실제 계산은 1배로 처리됩니다.",
+        "invalid_position_size_error": "포지션 비율은 0에서 100 사이여야 합니다.",
+        "invalid_fee_rate_error": "수수료율은 0보다 작을 수 없습니다. 0 또는 양수를 입력하세요. 예: 0.05는 0.05%, 즉 0.0005를 의미합니다.",
+        "invalid_slippage_error": "슬리피지는 0보다 작을 수 없습니다. 0 또는 양수를 입력하세요. 예: 0.02는 0.02%를 의미합니다.",
+        "timeframe_not_found_error": "{symbol}의 {timeframe} K라인 데이터를 찾을 수 없습니다. 현재 사용 가능한 주기: {keys}",
+        "too_few_klines_error": "필터링 후 K라인 수가 너무 적습니다. 현재 {count}개입니다. 기간을 넓혀 주세요.",
+    },
+    "en": {
+        "header": """
+# QTBS AI Quant Strategy Frontend
+
+Enter your natural-language strategy on the left, switch language at the top right, and configure market, symbol, timeframe, backtest period, initial cash, leverage, position size, fee, and slippage on the right.  
+Generate strategy code first, then run the backtest.
+""",
+        "language_label": "Language",
+        "strategy_label": "Strategy Natural-Language Input",
+        "strategy_placeholder": "Example: Go long when MA20 crosses above MA60, exit when MA20 crosses below MA60, no shorting.",
+        "market_label": "Market Selection",
+        "market_choice": "Cryptocurrency",
+        "symbol_label": "Trading Symbol",
+        "symbol_placeholder": "If empty, default is BTC. Example: BTC / ETH / SOL",
+        "timeframe_label": "Timeframe",
+        "start_label": "Start Time",
+        "end_label": "End Time",
+        "initial_cash_label": "Initial Cash",
+        "leverage_label": "Leverage",
+        "position_size_label": "Position Size（%）",
+        "fee_rate_label": "Fee Rate（%）",
+        "slippage_label": "Slippage（%）",
+        "generate_button": "Generate Strategy Code",
+        "backtest_button": "Run Backtest",
+        "code_output_label": "Strategy Code Generated by DeepSeek",
+        "result_output_label": "Backtest Result",
+        "chart_file_label": "Backtest Chart File",
+        "empty_strategy_error": "Strategy input cannot be empty.",
+        "start_time_error": "Start time cannot be earlier than 2017-01-01.",
+        "invalid_date_error": "Invalid date format. Recommended format: YYYY-MM-DD, for example 2017-01-13. Also supports 2017.1.13, 2017/1/13, 2017年1月13日, 13/1/2017, and 1/13/2017.",
+        "date_order_error": "End time cannot be earlier than start time.",
+        "api_fail_error": "DeepSeek API call failed",
+        "backtest_fail_error": "Backtest failed",
+        "no_code_error": "Strategy code is empty. Generate strategy code first.",
+        "invalid_number_error": "Please enter a valid number.",
+        "invalid_initial_cash_error": "Initial cash must be greater than 0.",
+        "invalid_leverage_error": "Leverage must be an integer between 0 and 200. 0 means no leverage and will be calculated as 1x.",
+        "invalid_position_size_error": "Position size must be between 0 and 100.",
+        "invalid_fee_rate_error": "Fee rate cannot be less than 0. Enter 0 or a positive number. Example: 0.05 means 0.05%, equal to 0.0005.",
+        "invalid_slippage_error": "Slippage cannot be less than 0. Enter 0 or a positive number. Example: 0.02 means 0.02%.",
+        "timeframe_not_found_error": "Cannot find {timeframe} K-line data for {symbol}. Available timeframes: {keys}",
+        "too_few_klines_error": "Too few K-lines after filtering. Current count: {count}. Please expand the time range.",
+    },
+    "ja": {
+        "header": """
+# QTBS AI 量的戦略フロントエンド
+
+左側に自然言語の戦略を入力し、右上で言語を切り替え、右側で市場、取引銘柄、時間足、バックテスト期間、初期資金、レバレッジ、ポジション比率、手数料、スリッページを設定します。  
+まず戦略コードを生成し、その後バックテストを実行します。
+""",
+        "language_label": "言語",
+        "strategy_label": "戦略・自然言語入力欄",
+        "strategy_placeholder": "例：MA20がMA60を上抜けしたら買い、MA20がMA60を下抜けしたら決済、空売りなし。",
+        "market_label": "市場選択",
+        "market_choice": "暗号資産",
+        "symbol_label": "取引銘柄",
+        "symbol_placeholder": "未入力の場合は BTC がデフォルトです。例：BTC / ETH / SOL",
+        "timeframe_label": "時間足",
+        "start_label": "開始時間",
+        "end_label": "終了時間",
+        "initial_cash_label": "初期資金",
+        "leverage_label": "レバレッジ",
+        "position_size_label": "ポジション比率（%）",
+        "fee_rate_label": "手数料率（%）",
+        "slippage_label": "スリッページ（%）",
+        "generate_button": "戦略コードを生成",
+        "backtest_button": "バックテストを実行",
+        "code_output_label": "DeepSeek が生成した戦略コード",
+        "result_output_label": "バックテスト結果",
+        "chart_file_label": "バックテストチャートファイル",
+        "empty_strategy_error": "戦略入力は空にできません。",
+        "start_time_error": "開始時間は 2017-01-01 より前にできません。",
+        "invalid_date_error": "日付形式が無効です。推奨形式は YYYY-MM-DD です。例：2017-01-13。2017.1.13、2017/1/13、2017年1月13日、13/1/2017 も対応しています。",
+        "date_order_error": "終了時間は開始時間より前にできません。",
+        "api_fail_error": "DeepSeek API の呼び出しに失敗しました",
+        "backtest_fail_error": "バックテスト実行に失敗しました",
+        "no_code_error": "戦略コードが空です。先に戦略コードを生成してください。",
+        "invalid_number_error": "有効な数値を入力してください。",
+        "invalid_initial_cash_error": "初期資金は 0 より大きい必要があります。",
+        "invalid_leverage_error": "レバレッジは 0 から 200 までの整数である必要があります。0 はレバレッジなしを意味し、実際の計算では 1倍として扱います。",
+        "invalid_position_size_error": "ポジション比率は 0 から 100 の間である必要があります。",
+        "invalid_fee_rate_error": "手数料率は 0 未満にできません。0 または正の数を入力してください。例：0.05 は 0.05%、つまり 0.0005 を意味します。",
+        "invalid_slippage_error": "スリッページは 0 未満にできません。0 または正の数を入力してください。例：0.02 は 0.02% を意味します。",
+        "timeframe_not_found_error": "{symbol} の {timeframe} K線データが見つかりません。利用可能な時間足：{keys}",
+        "too_few_klines_error": "フィルタ後のK線数が少なすぎます。現在 {count} 本です。期間を広げてください。",
+    },
+    "ar": {
+        "header": """
+# واجهة QTBS AI لاستراتيجيات التداول الكمي
+
+أدخل الاستراتيجية باللغة الطبيعية في الجهة اليسرى، وغيّر اللغة من أعلى اليمين، واضبط السوق ورمز التداول والإطار الزمني وفترة الاختبار ورأس المال الأولي والرافعة المالية وحجم الصفقة والرسوم والانزلاق السعري في الجهة اليمنى.  
+قم بإنشاء كود الاستراتيجية أولاً، ثم شغّل الاختبار الخلفي.
+""",
+        "language_label": "اللغة",
+        "strategy_label": "حقل إدخال الاستراتيجية باللغة الطبيعية",
+        "strategy_placeholder": "مثال: افتح شراء عندما يتقاطع MA20 فوق MA60، وأغلق عندما يهبط MA20 أسفل MA60، بدون بيع على المكشوف.",
+        "market_label": "اختيار السوق",
+        "market_choice": "العملات المشفرة",
+        "symbol_label": "رمز التداول",
+        "symbol_placeholder": "إذا تُرك فارغًا فالقيمة الافتراضية هي BTC. مثال: BTC / ETH / SOL",
+        "timeframe_label": "الإطار الزمني",
+        "start_label": "وقت البداية",
+        "end_label": "وقت النهاية",
+        "initial_cash_label": "رأس المال الأولي",
+        "leverage_label": "الرافعة المالية",
+        "position_size_label": "حجم الصفقة（%）",
+        "fee_rate_label": "نسبة الرسوم（%）",
+        "slippage_label": "الانزلاق السعري（%）",
+        "generate_button": "إنشاء كود الاستراتيجية",
+        "backtest_button": "تشغيل الاختبار الخلفي",
+        "code_output_label": "كود الاستراتيجية الذي أنشأه DeepSeek",
+        "result_output_label": "نتيجة الاختبار الخلفي",
+        "chart_file_label": "ملف رسم الاختبار الخلفي",
+        "empty_strategy_error": "لا يمكن أن يكون إدخال الاستراتيجية فارغًا.",
+        "start_time_error": "لا يمكن أن يكون وقت البداية أقدم من 2017-01-01.",
+        "invalid_date_error": "تنسيق التاريخ غير صالح. التنسيق الموصى به هو YYYY-MM-DD، مثال: 2017-01-13. يتم أيضًا دعم 2017.1.13 و 2017/1/13 و 2017年1月13日 و 13/1/2017.",
+        "date_order_error": "لا يمكن أن يكون وقت النهاية أقدم من وقت البداية.",
+        "api_fail_error": "فشل استدعاء واجهة DeepSeek API",
+        "backtest_fail_error": "فشل تشغيل الاختبار الخلفي",
+        "no_code_error": "كود الاستراتيجية فارغ. يرجى إنشاء الكود أولاً.",
+        "invalid_number_error": "يرجى إدخال رقم صالح.",
+        "invalid_initial_cash_error": "يجب أن يكون رأس المال الأولي أكبر من 0.",
+        "invalid_leverage_error": "يجب أن تكون الرافعة المالية عددًا صحيحًا بين 0 و 200. القيمة 0 تعني عدم استخدام الرافعة ويتم الحساب فعليًا على أساس 1x.",
+        "invalid_position_size_error": "يجب أن يكون حجم الصفقة بين 0 و 100.",
+        "invalid_fee_rate_error": "لا يمكن أن تكون نسبة الرسوم أقل من 0. أدخل 0 أو رقمًا موجبًا. مثال: 0.05 يعني 0.05%، أي 0.0005.",
+        "invalid_slippage_error": "لا يمكن أن يكون الانزلاق السعري أقل من 0. أدخل 0 أو رقمًا موجبًا. مثال: 0.02 يعني 0.02%.",
+        "timeframe_not_found_error": "لا يمكن العثور على بيانات K-line للإطار {timeframe} للرمز {symbol}. الأطر المتاحة: {keys}",
+        "too_few_klines_error": "عدد شموع K-line بعد التصفية قليل جدًا. العدد الحالي: {count}. يرجى توسيع الفترة الزمنية.",
+    },
+    "ru": {
+        "header": """
+# QTBS AI фронтенд для количественных стратегий
+
+Слева введите стратегию на естественном языке, переключите язык в правом верхнем углу, а справа настройте рынок, инструмент, таймфрейм, период тестирования, начальный капитал, кредитное плечо, размер позиции, комиссию и проскальзывание.  
+Сначала сгенерируйте код стратегии, затем запустите бэктест.
+""",
+        "language_label": "Язык",
+        "strategy_label": "Поле ввода стратегии на естественном языке",
+        "strategy_placeholder": "Пример: открыть long, когда MA20 пересекает MA60 снизу вверх, закрыть позицию при обратном пересечении, без short.",
+        "market_label": "Выбор рынка",
+        "market_choice": "Криптовалюта",
+        "symbol_label": "Торговый инструмент",
+        "symbol_placeholder": "Если не указано, по умолчанию BTC. Например: BTC / ETH / SOL",
+        "timeframe_label": "Таймфрейм",
+        "start_label": "Начальное время",
+        "end_label": "Конечное время",
+        "initial_cash_label": "Начальный капитал",
+        "leverage_label": "Кредитное плечо",
+        "position_size_label": "Размер позиции（%）",
+        "fee_rate_label": "Комиссия（%）",
+        "slippage_label": "Проскальзывание（%）",
+        "generate_button": "Сгенерировать код стратегии",
+        "backtest_button": "Запустить бэктест",
+        "code_output_label": "Код стратегии, сгенерированный DeepSeek",
+        "result_output_label": "Результат бэктеста",
+        "chart_file_label": "Файл графика бэктеста",
+        "empty_strategy_error": "Поле стратегии не может быть пустым.",
+        "start_time_error": "Начальная дата не может быть раньше 2017-01-01.",
+        "invalid_date_error": "Неверный формат даты. Рекомендуемый формат: YYYY-MM-DD, например 2017-01-13. Также поддерживаются 2017.1.13, 2017/1/13, 2017年1月13日 и 13/1/2017.",
+        "date_order_error": "Конечное время не может быть раньше начального времени.",
+        "api_fail_error": "Ошибка вызова DeepSeek API",
+        "backtest_fail_error": "Ошибка запуска бэктеста",
+        "no_code_error": "Код стратегии пуст. Сначала сгенерируйте код стратегии.",
+        "invalid_number_error": "Введите корректное число.",
+        "invalid_initial_cash_error": "Начальный капитал должен быть больше 0.",
+        "invalid_leverage_error": "Кредитное плечо должно быть целым числом от 0 до 200. 0 означает отсутствие плеча и фактически рассчитывается как 1x.",
+        "invalid_position_size_error": "Размер позиции должен быть от 0 до 100.",
+        "invalid_fee_rate_error": "Комиссия не может быть меньше 0. Введите 0 или положительное число. Например: 0.05 означает 0.05%, то есть 0.0005.",
+        "invalid_slippage_error": "Проскальзывание не может быть меньше 0. Введите 0 или положительное число. Например: 0.02 означает 0.02%.",
+        "timeframe_not_found_error": "Не найдены K-line данные {timeframe} для {symbol}. Доступные таймфреймы: {keys}",
+        "too_few_klines_error": "После фильтрации осталось слишком мало K-line данных. Текущее количество: {count}. Расширьте временной диапазон.",
+    },
+}
+
+
+SUMMARY_TEXTS = {
+    "zh": {
+        "completed": "回测完成。",
+        "market": "市场",
+        "symbol": "交易标的",
+        "timeframe": "周期",
+        "start_time": "起始时间",
+        "end_time": "结束时间",
+        "kline_count": "K线数量",
+        "initial_cash": "初始资金",
+        "leverage": "杠杆倍数",
+        "effective_leverage": "实际计算杠杆",
+        "position_size": "仓位比例",
+        "final_equity": "最终权益",
+        "total_return": "总收益率",
+        "gross_win_rate": "毛胜率",
+        "net_win_rate": "净胜率",
+        "avg_profit": "平均盈利",
+        "avg_loss": "平均亏损",
+        "payoff_ratio": "盈亏比",
+        "profit_factor": "Profit Factor",
+        "max_drawdown": "最大回撤",
+        "annual_return": "年化收益",
+        "sharpe_ratio": "夏普比率",
+        "trade_count": "交易次数",
+        "max_consecutive_wins": "最大连续盈利次数",
+        "max_consecutive_losses": "最大连续亏损次数",
+        "avg_holding_hours": "平均持仓时间（小时）",
+        "fee_rate": "手续费率",
+        "slippage": "滑点",
+        "chart_file": "图表文件",
+        "chart_path_missing": "图表已生成，但 generic_chart.py 没有 return 文件路径。",
+        "na": "无",
+    },
+    "ko": {
+        "completed": "백테스트 완료.",
+        "market": "시장",
+        "symbol": "거래 종목",
+        "timeframe": "주기",
+        "start_time": "시작 시간",
+        "end_time": "종료 시간",
+        "kline_count": "K라인 수",
+        "initial_cash": "초기 자금",
+        "leverage": "레버리지",
+        "effective_leverage": "실제 계산 레버리지",
+        "position_size": "포지션 비율",
+        "final_equity": "최종 자산",
+        "total_return": "총 수익률",
+        "gross_win_rate": "총 승률",
+        "net_win_rate": "순 승률",
+        "avg_profit": "평균 수익",
+        "avg_loss": "평균 손실",
+        "payoff_ratio": "손익비",
+        "profit_factor": "Profit Factor",
+        "max_drawdown": "최대 낙폭",
+        "annual_return": "연환산 수익률",
+        "sharpe_ratio": "샤프 비율",
+        "trade_count": "거래 횟수",
+        "max_consecutive_wins": "최대 연속 수익 횟수",
+        "max_consecutive_losses": "최대 연속 손실 횟수",
+        "avg_holding_hours": "평균 보유 시간（시간）",
+        "fee_rate": "수수료율",
+        "slippage": "슬리피지",
+        "chart_file": "차트 파일",
+        "chart_path_missing": "차트는 생성되었지만 generic_chart.py가 파일 경로를 반환하지 않았습니다.",
+        "na": "없음",
+    },
+    "en": {
+        "completed": "Backtest completed.",
+        "market": "Market",
+        "symbol": "Trading Symbol",
+        "timeframe": "Timeframe",
+        "start_time": "Start Time",
+        "end_time": "End Time",
+        "kline_count": "K-line Count",
+        "initial_cash": "Initial Cash",
+        "leverage": "Leverage",
+        "effective_leverage": "Effective Leverage",
+        "position_size": "Position Size",
+        "final_equity": "Final Equity",
+        "total_return": "Total Return",
+        "gross_win_rate": "Gross Win Rate",
+        "net_win_rate": "Net Win Rate",
+        "avg_profit": "Average Profit",
+        "avg_loss": "Average Loss",
+        "payoff_ratio": "Payoff Ratio",
+        "profit_factor": "Profit Factor",
+        "max_drawdown": "Max Drawdown",
+        "annual_return": "Annualized Return",
+        "sharpe_ratio": "Sharpe Ratio",
+        "trade_count": "Trade Count",
+        "max_consecutive_wins": "Max Consecutive Wins",
+        "max_consecutive_losses": "Max Consecutive Losses",
+        "avg_holding_hours": "Average Holding Time（hours）",
+        "fee_rate": "Fee Rate",
+        "slippage": "Slippage",
+        "chart_file": "Chart File",
+        "chart_path_missing": "The chart was generated, but generic_chart.py did not return a file path.",
+        "na": "N/A",
+    },
+    "ja": {
+        "completed": "バックテスト完了。",
+        "market": "市場",
+        "symbol": "取引銘柄",
+        "timeframe": "時間足",
+        "start_time": "開始時間",
+        "end_time": "終了時間",
+        "kline_count": "K線数",
+        "initial_cash": "初期資金",
+        "leverage": "レバレッジ",
+        "effective_leverage": "実際の計算レバレッジ",
+        "position_size": "ポジション比率",
+        "final_equity": "最終資産",
+        "total_return": "総収益率",
+        "gross_win_rate": "グロス勝率",
+        "net_win_rate": "ネット勝率",
+        "avg_profit": "平均利益",
+        "avg_loss": "平均損失",
+        "payoff_ratio": "損益比",
+        "profit_factor": "Profit Factor",
+        "max_drawdown": "最大ドローダウン",
+        "annual_return": "年率収益",
+        "sharpe_ratio": "シャープレシオ",
+        "trade_count": "取引回数",
+        "max_consecutive_wins": "最大連続勝利回数",
+        "max_consecutive_losses": "最大連続損失回数",
+        "avg_holding_hours": "平均保有時間（時間）",
+        "fee_rate": "手数料率",
+        "slippage": "スリッページ",
+        "chart_file": "チャートファイル",
+        "chart_path_missing": "チャートは生成されましたが、generic_chart.py がファイルパスを返していません。",
+        "na": "なし",
+    },
+    "ar": {
+        "completed": "اكتمل الاختبار الخلفي.",
+        "market": "السوق",
+        "symbol": "رمز التداول",
+        "timeframe": "الإطار الزمني",
+        "start_time": "وقت البداية",
+        "end_time": "وقت النهاية",
+        "kline_count": "عدد شموع K-line",
+        "initial_cash": "رأس المال الأولي",
+        "leverage": "الرافعة المالية",
+        "effective_leverage": "الرافعة الفعلية في الحساب",
+        "position_size": "حجم الصفقة",
+        "final_equity": "القيمة النهائية",
+        "total_return": "إجمالي العائد",
+        "gross_win_rate": "نسبة الربح الإجمالية",
+        "net_win_rate": "نسبة الربح الصافية",
+        "avg_profit": "متوسط الربح",
+        "avg_loss": "متوسط الخسارة",
+        "payoff_ratio": "نسبة الربح إلى الخسارة",
+        "profit_factor": "Profit Factor",
+        "max_drawdown": "أقصى تراجع",
+        "annual_return": "العائد السنوي",
+        "sharpe_ratio": "نسبة شارب",
+        "trade_count": "عدد الصفقات",
+        "max_consecutive_wins": "أقصى عدد أرباح متتالية",
+        "max_consecutive_losses": "أقصى عدد خسائر متتالية",
+        "avg_holding_hours": "متوسط مدة الاحتفاظ（بالساعات）",
+        "fee_rate": "نسبة الرسوم",
+        "slippage": "الانزلاق السعري",
+        "chart_file": "ملف الرسم البياني",
+        "chart_path_missing": "تم إنشاء الرسم البياني، لكن generic_chart.py لم يُرجع مسار الملف.",
+        "na": "غير متاح",
+    },
+    "ru": {
+        "completed": "Бэктест завершен.",
+        "market": "Рынок",
+        "symbol": "Торговый инструмент",
+        "timeframe": "Таймфрейм",
+        "start_time": "Начальное время",
+        "end_time": "Конечное время",
+        "kline_count": "Количество K-line",
+        "initial_cash": "Начальный капитал",
+        "leverage": "Кредитное плечо",
+        "effective_leverage": "Фактическое плечо в расчете",
+        "position_size": "Размер позиции",
+        "final_equity": "Итоговый капитал",
+        "total_return": "Общая доходность",
+        "gross_win_rate": "Валовая доля прибыльных сделок",
+        "net_win_rate": "Чистая доля прибыльных сделок",
+        "avg_profit": "Средняя прибыль",
+        "avg_loss": "Средний убыток",
+        "payoff_ratio": "Соотношение прибыль/убыток",
+        "profit_factor": "Profit Factor",
+        "max_drawdown": "Максимальная просадка",
+        "annual_return": "Годовая доходность",
+        "sharpe_ratio": "Коэффициент Шарпа",
+        "trade_count": "Количество сделок",
+        "max_consecutive_wins": "Максимальная серия прибыльных сделок",
+        "max_consecutive_losses": "Максимальная серия убыточных сделок",
+        "avg_holding_hours": "Среднее время удержания（часы）",
+        "fee_rate": "Комиссия",
+        "slippage": "Проскальзывание",
+        "chart_file": "Файл графика",
+        "chart_path_missing": "График создан, но generic_chart.py не вернул путь к файлу.",
+        "na": "нет данных",
+    },
+}
+
+
+# =========================================================
+# 基础工具函数
+# =========================================================
+
+def get_ui_text(lang_code: str) -> dict:
+    return UI_TEXTS.get(lang_code, UI_TEXTS["zh"])
+
+
+def get_summary_text(lang_code: str) -> dict:
+    return SUMMARY_TEXTS.get(lang_code, SUMMARY_TEXTS["zh"])
+
+
+def normalize_date(date_value, default_value: str, lang_code: str = "zh") -> str:
+    """
+    把用户输入的日期统一转成 YYYY-MM-DD。
+
+    支持：
+        2017-01-13
+        2017/01/13
+        2017.1.13
+        2017年1月13日
+        13/1/2017
+        13-1-2017
+        13.1.2017
+        1/13/2017
+
+    规则：
+        1. 如果第一个数字是 4 位，按 年/月/日 解析。
+        2. 如果第三个数字是 4 位：
+           - 第一位 > 12，按 日/月/年。
+           - 第二位 > 12，按 月/日/年。
+           - 都不大于 12 时，默认按 日/月/年。
+    """
+
+    text = get_ui_text(lang_code)
+
+    if date_value is None or str(date_value).strip() == "":
+        return default_value
+
+    raw = str(date_value).strip()
+
+    # Gradio DateTime 可能返回：
+    # 2017-01-13 00:00:00
+    # 2017-01-13T00:00:00
+    raw = raw.split(" ")[0].strip()
+    raw = raw.split("T")[0].strip()
+
+    # 提取数字，兼容 2017.1.13 / 13/1/2017 / 2017年1月13日
+    parts = re.findall(r"\d+", raw)
+
+    if len(parts) < 3:
+        raise ValueError(text["invalid_date_error"])
+
+    a, b, c = parts[0], parts[1], parts[2]
+
+    try:
+        # 年/月/日：2017-01-13、2017.1.13、2017/1/13
+        if len(a) == 4:
+            year = int(a)
+            month = int(b)
+            day = int(c)
+
+        # 日/月/年 或 月/日/年：13/1/2017、1/13/2017
+        elif len(c) == 4:
+            year = int(c)
+            first = int(a)
+            second = int(b)
+
+            if first > 12 and second <= 12:
+                # 13/1/2017 -> 2017-01-13
+                day = first
+                month = second
+            elif second > 12 and first <= 12:
+                # 1/13/2017 -> 2017-01-13
+                month = first
+                day = second
+            else:
+                # 1/2/2017 这种有歧义，默认按 日/月/年
+                day = first
+                month = second
+
+        else:
+            raise ValueError(text["invalid_date_error"])
+
+        parsed_date = datetime(year, month, day)
+        return parsed_date.strftime("%Y-%m-%d")
+
+    except Exception:
+        raise ValueError(text["invalid_date_error"])
+
+
+def validate_date_range(start_str: str, end_str: str, lang_code: str):
+    """
+    校验日期范围。
+    start_str / end_str 必须已经是 YYYY-MM-DD。
+    """
+
+    text = get_ui_text(lang_code)
+
+    if start_str < "2017-01-01":
+        raise ValueError(text["start_time_error"])
+
+    if end_str < start_str:
+        raise ValueError(text["date_order_error"])
+
+
+def format_number(value, digits: int = 2, na_text: str = "-") -> str:
+    if value is None:
+        return na_text
+
+    try:
+        value = float(value)
+    except Exception:
+        return na_text
+
+    if math.isnan(value):
+        return na_text
+
+    if math.isinf(value):
+        return "∞"
+
+    return f"{value:.{digits}f}"
+
+
+def parse_float_input(value, default_value: float, lang_code: str) -> float:
+    text = get_ui_text(lang_code)
+
+    if value is None:
+        return default_value
+
+    value_str = str(value).strip()
+
+    if value_str == "":
+        return default_value
+
+    try:
+        return float(value_str)
+    except Exception:
+        raise ValueError(text["invalid_number_error"])
+
+
+def parse_int_input(value, default_value: int, lang_code: str) -> int:
+    text = get_ui_text(lang_code)
+
+    if value is None:
+        return default_value
+
+    value_str = str(value).strip()
+
+    if value_str == "":
+        return default_value
+
+    try:
+        value_float = float(value_str)
+    except Exception:
+        raise ValueError(text["invalid_number_error"])
+
+    if not value_float.is_integer():
+        raise ValueError(text["invalid_leverage_error"])
+
+    return int(value_float)
+
+
+def validate_backtest_params(
+    initial_cash,
+    leverage,
+    position_size_percent,
+    fee_rate_percent,
+    slippage_percent,
+    lang_code: str,
+):
+    text = get_ui_text(lang_code)
+
+    initial_cash_value = parse_float_input(initial_cash, 1000.0, lang_code)
+    leverage_value = parse_int_input(leverage, 1, lang_code)
+    position_size_percent_value = parse_float_input(position_size_percent, 100.0, lang_code)
+    fee_rate_percent_value = parse_float_input(fee_rate_percent, 0.05, lang_code)
+    slippage_percent_value = parse_float_input(slippage_percent, 0.0, lang_code)
+
+    if initial_cash_value <= 0:
+        raise ValueError(text["invalid_initial_cash_error"])
+
+    if leverage_value < 0 or leverage_value > 200:
+        raise ValueError(text["invalid_leverage_error"])
+
+    if position_size_percent_value < 0 or position_size_percent_value > 100:
+        raise ValueError(text["invalid_position_size_error"])
+
+    if fee_rate_percent_value < 0:
+        raise ValueError(text["invalid_fee_rate_error"])
+
+    if slippage_percent_value < 0:
+        raise ValueError(text["invalid_slippage_error"])
+
+    effective_leverage_value = 1 if leverage_value == 0 else leverage_value
+
+    return (
+        initial_cash_value,
+        leverage_value,
+        effective_leverage_value,
+        position_size_percent_value,
+        fee_rate_percent_value,
+        slippage_percent_value,
+    )
+
+
+def filter_df_by_date(df, start_str: str, end_str: str):
+    """
+    按 index 时间过滤 K线。
+    要求 df.index 是 DatetimeIndex。
+    """
+
+    if start_str:
+        df = df[df.index >= start_str]
+
+    if end_str:
+        df = df[df.index <= end_str]
+
+    return df
+
+
+def build_backtest_summary(
+    metrics: dict,
+    lang_code: str,
+    market: str,
+    symbol: str,
+    timeframe: str,
+    start_str: str,
+    end_str: str,
+    kline_count: int,
+    leverage_value: int,
+    effective_leverage_value: int,
+    position_size_percent_value: float,
+    fee_rate_percent_value: float,
+    slippage_percent_value: float,
+    chart_path: str,
+) -> str:
+    text = get_summary_text(lang_code)
+    na = text["na"]
+
+    return f"""
+{text["completed"]}
+
+{text["market"]}：{market}
+{text["symbol"]}：{symbol}
+{text["timeframe"]}：{timeframe}
+{text["start_time"]}：{start_str}
+{text["end_time"]}：{end_str}
+{text["kline_count"]}：{kline_count}
+
+{text["initial_cash"]}：{format_number(metrics.get("initial_cash"), 2, na)}
+{text["leverage"]}：{leverage_value}x
+{text["effective_leverage"]}：{effective_leverage_value}x
+{text["position_size"]}：{format_number(position_size_percent_value, 2, na)}%
+{text["fee_rate"]}：{format_number(fee_rate_percent_value, 4, na)}%
+{text["slippage"]}：{format_number(slippage_percent_value, 4, na)}%
+
+{text["final_equity"]}：{format_number(metrics.get("final_equity"), 2, na)}
+{text["total_return"]}：{format_number(metrics.get("total_return_pct"), 2, na)}%
+{text["annual_return"]}：{format_number(metrics.get("annual_return_pct"), 2, na)}%
+{text["max_drawdown"]}：{format_number(metrics.get("max_drawdown_pct"), 2, na)}%
+{text["sharpe_ratio"]}：{format_number(metrics.get("sharpe_ratio"), 2, na)}
+
+{text["trade_count"]}：{metrics.get("trade_count", 0)}
+{text["gross_win_rate"]}：{format_number(metrics.get("gross_win_rate"), 2, na)}%
+{text["net_win_rate"]}：{format_number(metrics.get("net_win_rate"), 2, na)}%
+{text["avg_profit"]}：{format_number(metrics.get("avg_profit"), 2, na)}
+{text["avg_loss"]}：{format_number(metrics.get("avg_loss"), 2, na)}
+{text["payoff_ratio"]}：{format_number(metrics.get("payoff_ratio"), 2, na)}
+{text["profit_factor"]}：{format_number(metrics.get("profit_factor"), 2, na)}
+
+{text["max_consecutive_wins"]}：{metrics.get("max_consecutive_wins", 0)}
+{text["max_consecutive_losses"]}：{metrics.get("max_consecutive_losses", 0)}
+{text["avg_holding_hours"]}：{format_number(metrics.get("avg_holding_hours"), 2, na)}
+
+{text["chart_file"]}：
+{chart_path}
+"""
+
+
+# =========================================================
+# UI 文案动态更新
+# =========================================================
+
+def update_ui_language(lang_code: str):
+    text = get_ui_text(lang_code)
+
+    return [
+        text["header"],
+        gr.update(
+            label=text["strategy_label"],
+            placeholder=text["strategy_placeholder"],
+        ),
+        gr.update(
+            label=text["language_label"],
+            choices=LANGUAGE_CHOICES,
+            value=lang_code,
+        ),
+        gr.update(
+            label=text["market_label"],
+            choices=[(text["market_choice"], "crypto")],
+            value="crypto",
+        ),
+        gr.update(
+            label=text["symbol_label"],
+            placeholder=text["symbol_placeholder"],
+        ),
+        gr.update(
+            label=text["timeframe_label"],
+        ),
+        gr.update(
+            label=text["start_label"],
+        ),
+        gr.update(
+            label=text["end_label"],
+        ),
+        gr.update(
+            label=text["initial_cash_label"],
+        ),
+        gr.update(
+            label=text["leverage_label"],
+        ),
+        gr.update(
+            label=text["position_size_label"],
+        ),
+        gr.update(
+            label=text["fee_rate_label"],
+        ),
+        gr.update(
+            label=text["slippage_label"],
+        ),
+        gr.update(
+            value=text["generate_button"],
+        ),
+        gr.update(
+            value=text["backtest_button"],
+        ),
+        gr.update(
+            label=text["code_output_label"],
+        ),
+        gr.update(
+            label=text["result_output_label"],
+        ),
+        gr.update(
+            label=text["chart_file_label"],
+        ),
+    ]
+
+
+# =========================================================
+# DeepSeek 生成策略代码
+# =========================================================
+
+def generate_code_from_ui(
+    strategy_text: str,
+    output_language: str,
+    market: str,
+    symbol: str,
+    timeframe: str,
+    start_time,
+    end_time,
+    initial_cash,
+    leverage,
+    position_size_percent,
+    fee_rate_percent,
+    slippage_percent,
+):
+    text = get_ui_text(output_language)
+
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    try:
+        start_str = normalize_date(start_time, "2017-01-01", output_language)
+        end_str = normalize_date(end_time, today_utc, output_language)
+        validate_date_range(start_str, end_str, output_language)
+    except Exception as e:
+        return f"# {str(e)}"
+
+    if strategy_text is None or strategy_text.strip() == "":
+        return f"# {text['empty_strategy_error']}"
+
+    if symbol is None or symbol.strip() == "":
+        symbol = "BTC"
+
+    symbol = normalize_symbol(symbol)
+
+    try:
+        (
+            initial_cash_value,
+            leverage_value,
+            effective_leverage_value,
+            position_size_percent_value,
+            fee_rate_percent_value,
+            slippage_percent_value,
+        ) = validate_backtest_params(
+            initial_cash=initial_cash,
+            leverage=leverage,
+            position_size_percent=position_size_percent,
+            fee_rate_percent=fee_rate_percent,
+            slippage_percent=slippage_percent,
+            lang_code=output_language,
+        )
+    except Exception as e:
+        return f"# {str(e)}"
+
+    try:
+        strategy_code = generate_strategy_code_with_deepseek(
+            user_text=strategy_text,
+            market=market,
+            symbol=symbol,
+            timeframe=timeframe,
+            language=LANGUAGE_NAME_MAP.get(output_language, "中文"),
+            allow_short=False,
+            initial_cash=initial_cash_value,
+            fee_rate_percent=fee_rate_percent_value,
+            slippage_percent=slippage_percent_value,
+        )
+
+        return strategy_code
+
+    except Exception as e:
+        return f"# {text['api_fail_error']}\n# {str(e)}"
+
+
+# =========================================================
+# 运行回测
+# =========================================================
+
+def run_backtest_from_ui(
+    strategy_code: str,
+    output_language: str,
+    market: str,
+    symbol: str,
+    timeframe: str,
+    start_time,
+    end_time,
+    initial_cash,
+    leverage,
+    position_size_percent,
+    fee_rate_percent,
+    slippage_percent,
+):
+    text = get_ui_text(output_language)
+    summary_text = get_summary_text(output_language)
+
+    try:
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        try:
+            start_str = normalize_date(start_time, "2017-01-01", output_language)
+            end_str = normalize_date(end_time, today_utc, output_language)
+            validate_date_range(start_str, end_str, output_language)
+        except Exception as e:
+            return str(e), None
+
+        if strategy_code is None or strategy_code.strip() == "":
+            return text["no_code_error"], None
+
+        if symbol is None or symbol.strip() == "":
+            symbol = "BTC"
+
+        symbol = normalize_symbol(symbol)
+
+        try:
+            (
+                initial_cash_value,
+                leverage_value,
+                effective_leverage_value,
+                position_size_percent_value,
+                fee_rate_percent_value,
+                slippage_percent_value,
+            ) = validate_backtest_params(
+                initial_cash=initial_cash,
+                leverage=leverage,
+                position_size_percent=position_size_percent,
+                fee_rate_percent=fee_rate_percent,
+                slippage_percent=slippage_percent,
+                lang_code=output_language,
+            )
+        except Exception as e:
+            return str(e), None
+
+        fee_rate_value = fee_rate_percent_value / 100
+        slippage_value = slippage_percent_value / 100
+        position_size_value = position_size_percent_value / 100
+
+        # 1. 保存并加载策略函数
+        save_strategy_code(strategy_code)
+        strategy_func = load_strategy_func()
+
+        # 2. 加载真实 K 线
+        kline_data = load_real_kline(symbol)
+
+        if timeframe not in kline_data:
+            return text["timeframe_not_found_error"].format(
+                symbol=symbol,
+                timeframe=timeframe,
+                keys=list(kline_data.keys()),
+            ), None
+
+        df = kline_data[timeframe].copy()
+
+        # 3. 按时间过滤
+        df = filter_df_by_date(df, start_str, end_str)
+
+        if len(df) < 100:
+            return text["too_few_klines_error"].format(
+                count=len(df),
+            ), None
+
+        # 4. 运行回测
+        backtester = CodeBacktestCore(
+            strategy_func=strategy_func,
+            initial_cash=initial_cash_value,
+            fee_rate=fee_rate_value,
+            slippage=slippage_value,
+            leverage=effective_leverage_value,
+            position_size=position_size_value,
+        )
+
+        result = backtester.run(df)
+        metrics = result["metrics"]
+
+        # 5. 生成图表
+        html_path = plot_generic_equity_curves(
+            result=result,
+            output_dir="Past_data",
+            file_prefix=f"{symbol}_{timeframe}_webui_code_strategy",
+            title=f"{symbol} {timeframe} AI代码策略回测净值曲线",
+            auto_open=True,
+        )
+
+        chart_path = html_path if html_path else summary_text["chart_path_missing"]
+
+        summary = build_backtest_summary(
+            metrics=metrics,
+            lang_code=output_language,
+            market=market,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_str=start_str,
+            end_str=end_str,
+            kline_count=len(df),
+            leverage_value=leverage_value,
+            effective_leverage_value=effective_leverage_value,
+            position_size_percent_value=position_size_percent_value,
+            fee_rate_percent_value=fee_rate_percent_value,
+            slippage_percent_value=slippage_percent_value,
+            chart_path=chart_path,
+        )
+
+        return summary, html_path
+
+    except Exception as e:
+        return f"{text['backtest_fail_error']}：{str(e)}", None
+
+
+# =========================================================
+# 页面 CSS
+# =========================================================
+
+custom_css = """
+#main-container {
+    max-width: 1500px;
+    margin: 0 auto;
+}
+
+#top-bar {
+    align-items: flex-start;
+    margin-bottom: 8px;
+}
+
+#header-panel {
+    padding-right: 20px;
+}
+
+#language-top-panel {
+    max-width: 210px;
+    margin-left: auto;
+    padding-top: 6px;
+}
+
+#language-select {
+    max-width: 200px;
+}
+
+#language-select label {
+    font-size: 13px !important;
+}
+
+#language-select input {
+    font-size: 13px !important;
+}
+
+#language-select .wrap {
+    min-height: 36px !important;
+}
+
+#strategy-box textarea {
+    min-height: 430px !important;
+    font-size: 18px !important;
+    border-radius: 18px !important;
+    background: #e8f7fa !important;
+    border: 2px solid #6f6f6f !important;
+}
+
+#right-panel {
+    padding-top: 20px;
+}
+
+/* 右侧两列参数区 */
+.param-row {
+    gap: 12px !important;
+    margin-bottom: 2px !important;
+}
+
+/* 让右侧输入框更紧凑一点 */
+#right-panel input,
+#right-panel textarea {
+    font-size: 14px !important;
+}
+
+/* 日期选择框不要太挤 */
+#right-panel .wrap {
+    min-height: 38px !important;
+}
+
+/* 按钮区域 */
+#button-row {
+    gap: 12px !important;
+    margin-top: 12px !important;
+}
+
+#generate-button, #backtest-button {
+    height: 48px;
+    font-size: 18px;
+    border-radius: 14px;
+}
+
+#output-code textarea {
+    font-size: 14px !important;
+}
+
+#result-box textarea {
+    font-size: 15px !important;
+}
+"""
+
+
+# =========================================================
+# Gradio 前端
+# =========================================================
+
+default_lang = "zh"
+default_text = get_ui_text(default_lang)
+
+with gr.Blocks(
+    title="QTBS AI Quant Strategy Frontend",
+) as demo:
+
+    with gr.Column(elem_id="main-container"):
+
+        # 顶部区域：左侧标题说明，右上角语言选择
+        with gr.Row(elem_id="top-bar"):
+
+            with gr.Column(scale=8, elem_id="header-panel"):
+                header_md = gr.Markdown(default_text["header"])
+
+            with gr.Column(scale=2, min_width=180, elem_id="language-top-panel"):
+                language_select = gr.Dropdown(
+                    label=default_text["language_label"],
+                    choices=LANGUAGE_CHOICES,
+                    value=default_lang,
+                    interactive=True,
+                    elem_id="language-select",
+                )
+
+        # 主体区域：左侧策略输入，右侧回测参数
+        with gr.Row():
+
+            # 左侧：策略输入框
+            with gr.Column(scale=7, min_width=650):
+                strategy_input = gr.Textbox(
+                    label=default_text["strategy_label"],
+                    placeholder=default_text["strategy_placeholder"],
+                    lines=18,
+                    elem_id="strategy-box",
+                )
+
+            # 右侧：参数栏
+            with gr.Column(scale=3, min_width=420, elem_id="right-panel"):
+
+                # 交易市场选择：保持单独一整行，不并排
+                market_select = gr.Dropdown(
+                    label=default_text["market_label"],
+                    choices=[(default_text["market_choice"], "crypto")],
+                    value="crypto",
+                    interactive=False,
+                )
+
+                # 第一行：交易标的 + 时间周期
+                with gr.Row(elem_classes=["param-row"]):
+                    symbol_input = gr.Textbox(
+                        label=default_text["symbol_label"],
+                        value="BTC",
+                        placeholder=default_text["symbol_placeholder"],
+                        scale=1,
+                    )
+
+                    timeframe_select = gr.Dropdown(
+                        label=default_text["timeframe_label"],
+                        choices=["1m", "5m", "15m", "1h", "4h", "1d"],
+                        value="4h",
+                        interactive=True,
+                        scale=1,
+                    )
+
+                # 第二行：起始时间 + 结束时间
+                with gr.Row(elem_classes=["param-row"]):
+                    start_date = gr.DateTime(
+                        label=default_text["start_label"],
+                        value="2017-01-01",
+                        include_time=False,
+                        type="string",
+                        timezone="UTC",
+                        scale=1,
+                    )
+
+                    end_date = gr.DateTime(
+                        label=default_text["end_label"],
+                        value=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                        include_time=False,
+                        type="string",
+                        timezone="UTC",
+                        scale=1,
+                    )
+
+                # 第三行：初始资金 + 杠杆倍数
+                with gr.Row(elem_classes=["param-row"]):
+                    initial_cash_input = gr.Number(
+                        label=default_text["initial_cash_label"],
+                        value=1000,
+                        precision=2,
+                        minimum=0.01,
+                        step=100,
+                        scale=1,
+                    )
+
+                    leverage_input = gr.Number(
+                        label=default_text["leverage_label"],
+                        value=1,
+                        precision=0,
+                        minimum=0,
+                        maximum=200,
+                        step=1,
+                        scale=1,
+                    )
+
+                # 第四行：仓位比例 + 手续费率
+                with gr.Row(elem_classes=["param-row"]):
+                    position_size_input = gr.Number(
+                        label=default_text["position_size_label"],
+                        value=100,
+                        precision=2,
+                        minimum=0,
+                        maximum=100,
+                        step=1,
+                        scale=1,
+                    )
+
+                    fee_rate_input = gr.Number(
+                        label=default_text["fee_rate_label"],
+                        value=0.05,
+                        precision=4,
+                        minimum=0,
+                        step=0.01,
+                        scale=1,
+                    )
+
+                # 第五行：滑点 + 留空占位
+                with gr.Row(elem_classes=["param-row"]):
+                    slippage_input = gr.Number(
+                        label=default_text["slippage_label"],
+                        value=0,
+                        precision=4,
+                        minimum=0,
+                        step=0.01,
+                        scale=1,
+                    )
+
+                    with gr.Column(scale=1):
+                        gr.Markdown("")
+
+                # 按钮：并排，减少右侧高度
+                with gr.Row(elem_id="button-row"):
+                    generate_button = gr.Button(
+                        value=default_text["generate_button"],
+                        variant="primary",
+                        elem_id="generate-button",
+                        scale=1,
+                    )
+
+                    backtest_button = gr.Button(
+                        value=default_text["backtest_button"],
+                        variant="secondary",
+                        elem_id="backtest-button",
+                        scale=1,
+                    )
+
+        strategy_code_output = gr.Code(
+            label=default_text["code_output_label"],
+            language="python",
+            lines=26,
+            elem_id="output-code",
+        )
+
+        backtest_result_output = gr.Textbox(
+            label=default_text["result_output_label"],
+            lines=20,
+            elem_id="result-box",
+        )
+
+        chart_file_output = gr.File(
+            label=default_text["chart_file_label"],
+        )
+
+        # 语言切换：动态更新整个 UI 文字
+        language_select.change(
+            fn=update_ui_language,
+            inputs=[language_select],
+            outputs=[
+                header_md,
+                strategy_input,
+                language_select,
+                market_select,
+                symbol_input,
+                timeframe_select,
+                start_date,
+                end_date,
+                initial_cash_input,
+                leverage_input,
+                position_size_input,
+                fee_rate_input,
+                slippage_input,
+                generate_button,
+                backtest_button,
+                strategy_code_output,
+                backtest_result_output,
+                chart_file_output,
+            ],
+        )
+
+        # 生成策略代码
+        generate_button.click(
+            fn=generate_code_from_ui,
+            inputs=[
+                strategy_input,
+                language_select,
+                market_select,
+                symbol_input,
+                timeframe_select,
+                start_date,
+                end_date,
+                initial_cash_input,
+                leverage_input,
+                position_size_input,
+                fee_rate_input,
+                slippage_input,
+            ],
+            outputs=strategy_code_output,
+        )
+
+        # 运行回测
+        backtest_button.click(
+            fn=run_backtest_from_ui,
+            inputs=[
+                strategy_code_output,
+                language_select,
+                market_select,
+                symbol_input,
+                timeframe_select,
+                start_date,
+                end_date,
+                initial_cash_input,
+                leverage_input,
+                position_size_input,
+                fee_rate_input,
+                slippage_input,
+            ],
+            outputs=[
+                backtest_result_output,
+                chart_file_output,
+            ],
+        )
+
+
+# =========================================================
+# 启动
+# =========================================================
+
+if __name__ == "__main__":
+    demo.launch(
+        server_name="127.0.0.1",
+        server_port=7860,
+        inbrowser=True
+    )
