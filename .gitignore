@@ -49,8 +49,6 @@ Past_data/
 # =========================
 # K线数据 / 大型数据文件
 # =========================
-cryptocurrency_data/
-kline_data/
 *.csv
 *.parquet
 *.feather
