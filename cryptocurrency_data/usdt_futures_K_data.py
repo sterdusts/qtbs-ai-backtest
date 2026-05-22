@@ -108,7 +108,7 @@ def data_acquisition(
     market_type='usdt_futures',
     update_mode=True,
     drop_last_unclosed=True,
-    save_dir='cryptocurrency_data/futures_kline_data'
+    save_dir='futures_kline_data'
 ):
     API_KEY = ''
     API_SECRET = ''
@@ -213,7 +213,7 @@ if __name__ == "__main__":
             market_type='usdt_futures',
             update_mode=True,
             drop_last_unclosed=True,
-            save_dir='cryptocurrency_data/futures_kline_data'
+            save_dir='futures_kline_data'
         )
 
         end = time.perf_counter()

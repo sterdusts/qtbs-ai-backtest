@@ -10,7 +10,7 @@ LANG_TEXT = {
     "zh": {
         "lang_name": "中文",
         "chart_title": "策略回测图表",
-        "subtitle": "主图权益走势为归一化叠加；下方权益图显示真实数值",
+        "subtitle": "K线主图独立显示；权益、成交量、仓位分图显示",
         "price": "价格",
         "equity": "权益",
         "volume": "成交量",
@@ -31,7 +31,7 @@ LANG_TEXT = {
     "en": {
         "lang_name": "English",
         "chart_title": "Strategy Backtest Chart",
-        "subtitle": "Equity trend is normalized on the main chart; real equity values are shown below.",
+        "subtitle": "Candlesticks are shown independently; equity, volume, and position are shown below.",
         "price": "Price",
         "equity": "Equity",
         "volume": "Volume",
@@ -52,7 +52,7 @@ LANG_TEXT = {
     "ko": {
         "lang_name": "한국어",
         "chart_title": "전략 백테스트 차트",
-        "subtitle": "메인 차트의 자산 곡선은 정규화 표시이며, 실제 자산 값은 아래 차트에 표시됩니다.",
+        "subtitle": "캔들은 메인 차트에 독립적으로 표시되며, 자산·거래량·포지션은 아래 차트에 표시됩니다.",
         "price": "가격",
         "equity": "자산",
         "volume": "거래량",
@@ -73,7 +73,7 @@ LANG_TEXT = {
     "ja": {
         "lang_name": "日本語",
         "chart_title": "戦略バックテストチャート",
-        "subtitle": "メインチャートの資産曲線は正規化表示です。実際の資産値は下のチャートに表示されます。",
+        "subtitle": "ローソク足はメインチャートに独立表示し、資産・出来高・ポジションは下に表示します。",
         "price": "価格",
         "equity": "資産",
         "volume": "出来高",
@@ -94,7 +94,7 @@ LANG_TEXT = {
     "ru": {
         "lang_name": "Русский",
         "chart_title": "График бэктеста стратегии",
-        "subtitle": "Кривая капитала на основном графике нормализована; реальные значения показаны ниже.",
+        "subtitle": "Свечи показаны отдельно; капитал, объём и позиция показаны ниже.",
         "price": "Цена",
         "equity": "Капитал",
         "volume": "Объём",
@@ -115,7 +115,7 @@ LANG_TEXT = {
     "ar": {
         "lang_name": "العربية",
         "chart_title": "مخطط اختبار الاستراتيجية",
-        "subtitle": "منحنى رأس المال في الرسم الرئيسي مُطبّع؛ القيم الحقيقية تظهر في الرسم السفلي.",
+        "subtitle": "تظهر الشموع بشكل مستقل؛ ويظهر رأس المال والحجم والمركز في الرسوم السفلية.",
         "price": "السعر",
         "equity": "رأس المال",
         "volume": "الحجم",
@@ -404,6 +404,10 @@ html, body {
     height: 100vh !important;
 }
 
+canvas {
+    image-rendering: auto;
+}
+
 #qtbs-language-panel {
     position: fixed;
     top: 10px;
@@ -676,20 +680,10 @@ def plot_generic_equity_curves(
     auto_open: bool = True,
     focus_mode: str = "both",
     language: str = "zh",
-    default_visible_percent: int = 8,
+    show_equity_overlay: bool = False,
+    initial_kline_count: int = 60,
 ):
     language = language if language in LANG_TEXT else "zh"
-
-    # 缩放模式：用百分比控制默认可见范围，但价格轴仍然保持真实价格。
-    # 8 表示默认只显示最后 8% 的K线；想更放大就改成 5，想看更多就改成 15/20。
-    try:
-        default_visible_percent = int(default_visible_percent)
-    except Exception:
-        default_visible_percent = 8
-
-    default_visible_percent = max(3, min(default_visible_percent, 100))
-    datazoom_start = max(0, 100 - default_visible_percent)
-    datazoom_end = 100
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -733,22 +727,32 @@ def plot_generic_equity_curves(
         )
     )
 
+    # 默认只显示最后 initial_kline_count 根K线。
+    # 重点：用 range_start/range_end，而不是 start/end；pyecharts 里 start/end 可能不生效。
+    total_count = len(x_data)
+    initial_kline_count = max(20, int(initial_kline_count))
+
+    if total_count > initial_kline_count:
+        datazoom_start_percent = round((total_count - initial_kline_count) / total_count * 100, 4)
+    else:
+        datazoom_start_percent = 0
+
     datazoom = [
         opts.DataZoomOpts(
             type_="inside",
             xaxis_index=[0, 1, 2, 3],
-            range_start=datazoom_start,
-            range_end=datazoom_end,
+            range_start=datazoom_start_percent,
+            range_end=100,
             filter_mode="filter",
         ),
         opts.DataZoomOpts(
             type_="slider",
             xaxis_index=[0, 1, 2, 3],
-            range_start=datazoom_start,
-            range_end=datazoom_end,
-            filter_mode="filter",
+            range_start=datazoom_start_percent,
+            range_end=100,
             pos_bottom="1%",
-            height=18,
+            height=22,
+            filter_mode="filter",
         ),
     ]
 
@@ -767,12 +771,10 @@ def plot_generic_equity_curves(
         series_name=_t(language, "kline"),
         y_axis=kline_data,
         itemstyle_opts=opts.ItemStyleOpts(
-            # ECharts/Pyecharts: color 是上涨K线，color0 是下跌K线。
-            # 这里保持国内常用习惯：绿涨、红跌。
-            color="#14b143",
-            color0="#ef232a",
-            border_color="#14b143",
-            border_color0="#ef232a",
+            color="#ef232a",
+            color0="#14b143",
+            border_color="#ef232a",
+            border_color0="#14b143",
         ),
     )
 
@@ -811,7 +813,9 @@ def plot_generic_equity_curves(
             linestyle_opts=opts.LineStyleOpts(width=2, opacity=max(equity_opacity - 0.18, 0.2)),
         )
 
-    kline = kline.overlap(overlay_equity_line)
+    # 默认不要把权益线叠到K线主图。否则权益数值会污染价格Y轴，K线会被压成一条线。
+    if show_equity_overlay:
+        kline = kline.overlap(overlay_equity_line)
 
     open_x, open_y, close_x, close_y = _build_trade_points_from_trades(trades)
 
@@ -849,7 +853,7 @@ def plot_generic_equity_curves(
             pos_left="center",
             pos_top="1%",
         ),
-        legend_opts=opts.LegendOpts(pos_left="center", pos_top="8%"),
+        legend_opts=opts.LegendOpts(pos_left="center", pos_top="7%"),
         tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
         datazoom_opts=datazoom,
         xaxis_opts=opts.AxisOpts(
@@ -859,17 +863,22 @@ def plot_generic_equity_curves(
         ),
         yaxis_opts=opts.AxisOpts(
             type_="value",
-            name=_t(language, "price"),
+            name="",
             is_scale=True,
-            min_="dataMin",
-            max_="dataMax",
+            axislabel_opts=opts.LabelOpts(margin=14),
             splitarea_opts=opts.SplitAreaOpts(is_show=True),
         ),
     )
 
     grid.add(
         kline,
-        grid_opts=opts.GridOpts(pos_top="14%", pos_bottom="54%", pos_left="7%", pos_right="5%", is_contain_label=True),
+        grid_opts=opts.GridOpts(
+            pos_top="12%",
+            pos_bottom="50%",
+            pos_left="8.5%",
+            pos_right="4%",
+            is_contain_label=True,
+        ),
     )
 
     if len(floating_equity_raw) > 0 or len(realized_equity_raw) > 0:
@@ -901,12 +910,24 @@ def plot_generic_equity_curves(
             legend_opts=opts.LegendOpts(pos_left="center", pos_top="49%"),
             tooltip_opts=opts.TooltipOpts(trigger="axis"),
             xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False, axislabel_opts=opts.LabelOpts(is_show=False)),
-            yaxis_opts=opts.AxisOpts(type_="value", name=_t(language, "equity"), is_scale=True, split_number=3),
+            yaxis_opts=opts.AxisOpts(
+                type_="value",
+                name="",
+                is_scale=True,
+                split_number=3,
+                axislabel_opts=opts.LabelOpts(margin=14),
+            ),
         )
 
         grid.add(
             real_equity_line,
-            grid_opts=opts.GridOpts(pos_top="52%", pos_bottom="34%", pos_left="7%", pos_right="5%", is_contain_label=True),
+            grid_opts=opts.GridOpts(
+                pos_top="52%",
+                pos_bottom="31%",
+                pos_left="8.5%",
+                pos_right="4%",
+                is_contain_label=True,
+            ),
         )
 
     if "volume" in df.columns:
@@ -923,12 +944,23 @@ def plot_generic_equity_curves(
             legend_opts=opts.LegendOpts(is_show=False),
             tooltip_opts=opts.TooltipOpts(trigger="axis"),
             xaxis_opts=opts.AxisOpts(type_="category", axislabel_opts=opts.LabelOpts(is_show=False)),
-            yaxis_opts=opts.AxisOpts(type_="value", name=_t(language, "volume"), split_number=2),
+            yaxis_opts=opts.AxisOpts(
+                type_="value",
+                name="",
+                split_number=2,
+                axislabel_opts=opts.LabelOpts(margin=14),
+            ),
         )
 
         grid.add(
             bar,
-            grid_opts=opts.GridOpts(pos_top="71%", pos_bottom="21%", pos_left="7%", pos_right="5%", is_contain_label=True),
+            grid_opts=opts.GridOpts(
+                pos_top="72%",
+                pos_bottom="19%",
+                pos_left="8.5%",
+                pos_right="4%",
+                is_contain_label=True,
+            ),
         )
 
     if "target_position" in df.columns:
@@ -942,15 +974,28 @@ def plot_generic_equity_curves(
             label_opts=opts.LabelOpts(is_show=False),
         )
         position_line.set_global_opts(
-            legend_opts=opts.LegendOpts(pos_left="center", pos_top="83%"),
+            legend_opts=opts.LegendOpts(pos_left="center", pos_top="81%"),
             tooltip_opts=opts.TooltipOpts(trigger="axis"),
-            xaxis_opts=opts.AxisOpts(type_="category", axislabel_opts=opts.LabelOpts(rotate=25, font_size=10)),
-            yaxis_opts=opts.AxisOpts(type_="value", name=_t(language, "position"), min_=-1.2, max_=1.2, interval=1),
+            xaxis_opts=opts.AxisOpts(type_="category", axislabel_opts=opts.LabelOpts(rotate=0)),
+            yaxis_opts=opts.AxisOpts(
+                type_="value",
+                name="",
+                min_=-1.2,
+                max_=1.2,
+                interval=1,
+                axislabel_opts=opts.LabelOpts(margin=14),
+            ),
         )
 
         grid.add(
             position_line,
-            grid_opts=opts.GridOpts(pos_top="86%", pos_bottom="7%", pos_left="7%", pos_right="5%", is_contain_label=True),
+            grid_opts=opts.GridOpts(
+                pos_top="84%",
+                pos_bottom="5%",
+                pos_left="8.5%",
+                pos_right="4%",
+                is_contain_label=True,
+            ),
         )
 
     grid.render(output_html_name)
