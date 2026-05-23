@@ -16,6 +16,16 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 REVIEW_MODEL = "deepseek-v4-pro"
 
 
+LANGUAGE_REVIEW_NAME = {
+    "zh": "简体中文",
+    "en": "English",
+    "ko": "한국어",
+    "ja": "日本語",
+    "ar": "العربية",
+    "ru": "Русский",
+}
+
+
 def _extract_json(text: str) -> dict:
     text = text.strip()
 
@@ -53,12 +63,14 @@ def review_strategy_code_with_deepseek(
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("缺少 DEEPSEEK_API_KEY 环境变量")
 
+    review_language = LANGUAGE_REVIEW_NAME.get(language, "简体中文")
+
     client = OpenAI(
         api_key=DEEPSEEK_API_KEY,
         base_url=DEEPSEEK_BASE_URL,
     )
 
-    system_prompt = """
+    system_prompt = f"""
 你是一个量化策略代码审查员。
 
 你的任务不是生成策略代码，而是审查：
@@ -70,6 +82,11 @@ def review_strategy_code_with_deepseek(
 不要输出 confidence_summary。
 
 你必须只输出 JSON，不要输出 markdown，不要输出解释性正文。
+
+语言要求：
+- 你的 match_summary 必须使用：{review_language}
+- 即使用户原始策略描述不是 {review_language}，match_summary 也必须使用：{review_language}
+- JSON 字段名必须保持英文。
 """
 
     user_prompt = f"""
@@ -112,9 +129,10 @@ match_score：
 - 是否把“只做多/只做空/多空都做”理解错
 - 是否把用户的风控、过滤、止盈止损、仓位描述理解错
 
-语言要求：
-- 如果 language="{language}"，match_summary 使用对应语言。
-- JSON 字段名必须保持英文。
+再次强调语言要求：
+- match_summary 必须使用：{review_language}
+- 只允许输出 JSON
+- JSON 字段名必须保持英文
 """
 
     response = client.chat.completions.create(
