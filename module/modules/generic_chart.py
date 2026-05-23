@@ -910,7 +910,7 @@ def plot_generic_equity_curves(
 
     grid.add(
         kline,
-        grid_opts=opts.GridOpts(pos_top="14%", pos_bottom="43%", pos_left="6%", pos_right="20%", is_contain_label=True),
+        grid_opts=opts.GridOpts(pos_top="14%", pos_bottom="43%", pos_left="6%", pos_right="5%", is_contain_label=True),
     )
 
     if len(floating_equity_raw) > 0 or len(realized_equity_raw) > 0:
@@ -947,7 +947,7 @@ def plot_generic_equity_curves(
 
         grid.add(
             real_equity_line,
-            grid_opts=opts.GridOpts(pos_top="63%", pos_bottom="20%", pos_left="7%", pos_right="20%", is_contain_label=True),
+            grid_opts=opts.GridOpts(pos_top="63%", pos_bottom="20%", pos_left="7%", pos_right="5%", is_contain_label=True),
         )
 
     if "volume" in df.columns:
@@ -969,7 +969,7 @@ def plot_generic_equity_curves(
 
         grid.add(
             bar,
-            grid_opts=opts.GridOpts(pos_top="86%", pos_bottom="7%", pos_left="7%", pos_right="20%", is_contain_label=True),
+            grid_opts=opts.GridOpts(pos_top="86%", pos_bottom="7%", pos_left="7%", pos_right="5%", is_contain_label=True),
         )
 
 
